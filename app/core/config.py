@@ -28,8 +28,8 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
-    llm_timeout_seconds: int = 25
-    llm_max_retries: int = 1
+    llm_timeout_seconds: int = 20
+    llm_max_retries: int = 0
     chat_rate_per_minute: int = 12
     chat_max_message_chars: int = 800
 
@@ -135,3 +135,4 @@ def normalize_database_url(v: str) -> str:
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
