@@ -1,3 +1,4 @@
+
 """FastAPI application: JSON API + public site + admin SPA, all on ONE origin (so admin cookies are SameSite=Strict and need no CORS).
 
 Vercel finds the app through the top-level `app = FastAPI(...)` below (entrypoint `app.main:app`, also pinned in pyproject.toml).
@@ -5,6 +6,7 @@ On Vercel the files in `public/` are served by the CDN, so they are NOT mounted 
 """
 
 import html
+import os
 import re
 import uuid
 from contextlib import asynccontextmanager
@@ -34,6 +36,7 @@ from app.services.seed import seed_defaults
 log = get_logger(__name__)
 ROOT = Path(__file__).resolve().parent.parent
 PUBLIC_DIR, ADMIN_DIR, TEMPLATE_DIR = ROOT / "public", ROOT / "admin", ROOT / "app" / "templates"
+
 CSP_PUBLIC = (
     "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'; font-src 'self'; "
     "media-src 'self'; frame-src 'self'; object-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; worker-src 'self' blob:"
@@ -44,15 +47,19 @@ DEFAULT_SEO = {"title": "Portfolio", "description": "", "keywords": "", "og_imag
 
 def build_container(settings: Settings, *, llm=None, email="auto", create_tables: bool = False) -> Container:
     engine = make_engine(settings)
-    if create_tables:  # tests / quick local runs only; production uses `alembic upgrade head`
+
+    if create_tables:
         import app.models  # noqa: F401
 
         Base.metadata.create_all(engine)
+
     factory = make_session_factory(engine)
+
     if settings.effective_rate_limit_backend == "db":
 
         def make(n, w, m):
             return DbLimiter(factory, n, w, m)
+
     else:
 
         def make(n, w, m):
@@ -74,10 +81,12 @@ def _render_index(session: Session | None, settings: Settings) -> str:
     try:
         seo = content_service.get_group(session, "seo") if session is not None else dict(DEFAULT_SEO)
         img = content_service.media_url(session, seo.get("og_image_id")) if session is not None else None
-    except Exception:  # noqa: BLE001 - the shell must still load (it shows its own error state) if the DB is asleep/unreachable
+    except Exception:
         log.warning("index rendered without database SEO settings")
         seo, img = dict(DEFAULT_SEO), None
+
     base, e = settings.effective_site_url, html.escape
+
     meta = [
         f"<title>{e(seo['title'])}</title>",
         f'<meta name="description" content="{e(seo["description"])}">',
@@ -89,8 +98,10 @@ def _render_index(session: Session | None, settings: Settings) -> str:
         f'<meta property="og:url" content="{e(base)}/">',
         '<meta name="twitter:card" content="summary_large_image">',
     ]
+
     if img:
         meta.append(f'<meta property="og:image" content="{e(base + img)}">')
+
     template = (TEMPLATE_DIR / "index.html").read_text(encoding="utf-8")
     return re.sub(r"<!--SEO_META-->", "\n  ".join(meta), template)
 
@@ -100,9 +111,10 @@ def _make_lifespan(container: Container, settings: Settings):
     async def lifespan(app: FastAPI):
         try:
             with container.session_factory() as s:
-                seed_defaults(s)  # one-time starter content; never recreates content the owner deleted
-        except Exception as exc:  # noqa: BLE001 - e.g. migrations not applied yet: stay up, /api/v1/ready reports it
+                seed_defaults(s)
+        except Exception as exc:
             log.error("startup initialisation skipped: %s (run `alembic upgrade head`?)", type(exc).__name__)
+
         log.info(
             "startup complete (env=%s, vercel=%s, ai=%s, email=%s, rate_limit=%s)",
             settings.app_env,
@@ -131,36 +143,56 @@ def _fastapi_kwargs(settings: Settings, lifespan) -> dict:
 def install(app: FastAPI, settings: Settings, container: Container) -> FastAPI:
     """Attach middleware, error handlers, routes and static serving to a FastAPI instance."""
     app.state.container = container
+
     app.add_middleware(
-        CORSMiddleware, allow_origins=settings.origins, allow_credentials=False, allow_methods=["GET", "POST"], allow_headers=["Content-Type", "If-None-Match"]
+        CORSMiddleware,
+        allow_origins=settings.origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "If-None-Match"],
     )
 
     @app.middleware("http")
     async def context_and_headers(request: Request, call_next):
         rid = request.headers.get("x-request-id", "")[:64] or uuid.uuid4().hex[:16]
         tok = request_id_var.set(rid)
+
         try:
             response = await call_next(request)
         finally:
             request_id_var.reset(tok)
+
         path = request.url.path
         admin_path = path.startswith(("/admin", "/api/v1/admin"))
+
         response.headers["X-Request-ID"] = rid
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), geolocation=(), microphone=(self)"
-        if not path.startswith("/api/v1/docs") and "content-security-policy" not in response.headers:  # media route sets a stricter sandbox CSP
+
+        if not path.startswith("/api/v1/docs") and "content-security-policy" not in response.headers:
             response.headers["Content-Security-Policy"] = CSP_ADMIN if admin_path else CSP_PUBLIC
+
         response.headers["X-Frame-Options"] = "DENY" if admin_path else "SAMEORIGIN"
+
         if admin_path:
             response.headers["Cache-Control"] = "no-store"
             response.headers["X-Robots-Tag"] = "noindex, nofollow"
+
         if settings.cookie_secure:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
         return response
 
     def envelope(status: int, code: str, message: str, details=None) -> JSONResponse:
-        body = {"error": {"code": code, "message": message, "details": details, "request_id": request_id_var.get()}}
+        body = {
+            "error": {
+                "code": code,
+                "message": message,
+                "details": details,
+                "request_id": request_id_var.get(),
+            }
+        }
         return JSONResponse(status_code=status, content=body)
 
     @app.exception_handler(AppError)
@@ -169,18 +201,31 @@ def install(app: FastAPI, settings: Settings, container: Container) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_: Request, exc: RequestValidationError):
-        details = [{"field": ".".join(str(p) for p in e["loc"] if p != "body"), "message": e["msg"]} for e in exc.errors()]
+        details = [
+            {
+                "field": ".".join(str(p) for p in e["loc"] if p != "body"),
+                "message": e["msg"],
+            }
+            for e in exc.errors()
+        ]
         return envelope(422, "validation_failed", "Please check the highlighted fields.", details)
 
     @app.exception_handler(ValidationError)
-    async def _model_validation(_: Request, exc: ValidationError):  # settings groups are validated inside services
-        details = [{"field": ".".join(str(p) for p in e["loc"]), "message": e["msg"]} for e in exc.errors()]
+    async def _model_validation(_: Request, exc: ValidationError):
+        details = [
+            {"field": ".".join(str(p) for p in e["loc"]), "message": e["msg"]}
+            for e in exc.errors()
+        ]
         return envelope(422, "validation_failed", "Please check the highlighted fields.", details)
 
     @app.exception_handler(DBAPIError)
-    async def _db_error(_: Request, exc: DBAPIError):  # e.g. a sleeping/unreachable database: a clear 503, never a stack trace
+    async def _db_error(_: Request, exc: DBAPIError):
         log.error("database error: %s", type(exc).__name__)
-        return envelope(503, "database_unavailable", "The database is temporarily unavailable. Please retry in a moment.")
+        return envelope(
+            503,
+            "database_unavailable",
+            "The database is temporarily unavailable. Please retry in a moment.",
+        )
 
     @app.exception_handler(StarletteHTTPException)
     async def _http(_: Request, exc: StarletteHTTPException):
@@ -197,11 +242,12 @@ def install(app: FastAPI, settings: Settings, container: Container) -> FastAPI:
     def media(stored_name: str, db: Session = Depends(get_db)):
         asset = media_service.get_by_stored_name(db, stored_name)
         disposition = "inline" if asset.mime.startswith("image/") or asset.mime == "application/pdf" else "attachment"
+
         return Response(
             asset.data,
             media_type=asset.mime,
             headers={
-                "Cache-Control": "public, max-age=31536000, immutable",  # stored names are random per upload, so a URL's bytes never change
+                "Cache-Control": "public, max-age=31536000, immutable",
                 "Content-Disposition": f'{disposition}; filename="{asset.original_name}"',
                 "X-Content-Type-Options": "nosniff",
                 "Content-Security-Policy": "default-src 'none'; sandbox",
@@ -210,22 +256,30 @@ def install(app: FastAPI, settings: Settings, container: Container) -> FastAPI:
 
     @app.get("/robots.txt", include_in_schema=False)
     def robots(c: Container = Depends(get_container)):
-        return PlainTextResponse(f"User-agent: *\nDisallow: /admin\nDisallow: /api/v1/admin\nSitemap: {c.settings.effective_site_url}/sitemap.xml\n")
+        return PlainTextResponse(
+            f"User-agent: *\nDisallow: /admin\nDisallow: /api/v1/admin\nSitemap: {c.settings.effective_site_url}/sitemap.xml\n"
+        )
 
     @app.get("/sitemap.xml", include_in_schema=False)
     def sitemap(c: Container = Depends(get_container)):
         loc = html.escape(c.settings.effective_site_url)
-        xml = f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>{loc}/</loc></url></urlset>'
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            f"<url><loc>{loc}/</loc></url></urlset>"
+        )
         return Response(xml, media_type="application/xml")
 
     @app.get("/", include_in_schema=False)
     def index(request: Request, c: Container = Depends(get_container)):
-        # Not using Depends(get_db) on purpose: the page shell must render even when the database is unreachable.
+        
+        
         try:
             with c.session_factory() as s:
                 body = _render_index(s, c.settings)
-        except Exception:  # noqa: BLE001
+        except Exception:
             body = _render_index(None, c.settings)
+
         return HTMLResponse(body, headers={"Cache-Control": "public, max-age=0, must-revalidate"})
 
     @app.get("/admin", include_in_schema=False)
@@ -233,8 +287,10 @@ def install(app: FastAPI, settings: Settings, container: Container) -> FastAPI:
         return FileResponse(ADMIN_DIR / "index.html")
 
     app.mount("/admin/", StaticFiles(directory=ADMIN_DIR, html=True), name="admin")
-    if not settings.on_vercel:  # on Vercel public/ is served by the CDN (the docs say: do not mount it)
+
+    if not settings.on_vercel:
         app.mount("/", StaticFiles(directory=PUBLIC_DIR, html=True), name="public")
+
     return app
 
 
@@ -243,35 +299,70 @@ def create_app(settings: Settings | None = None, *, container: Container | None 
     settings = settings or get_settings()
     configure_logging(settings.log_level, settings.log_json)
     container = container or build_container(settings)
-    return install(FastAPI(**_fastapi_kwargs(settings, _make_lifespan(container, settings))), settings, container)
+
+    return install(
+        FastAPI(**_fastapi_kwargs(settings, _make_lifespan(container, settings))),
+        settings,
+        container,
+    )
 
 
 # ----------------------------------------------------------------------------------------------------------------------------
 # Module-level application: the entrypoint Vercel (and `uvicorn app.main:app`) loads.
-# If configuration is invalid (e.g. missing SECRET_KEY in production) we do not crash at import time: the app still boots and
-# answers every request with a clear 503 that names the problem (no secrets), which is far easier to debug than a failed deploy.
+# If configuration is invalid, the app still boots and answers requests with a clear 503.
 # ----------------------------------------------------------------------------------------------------------------------------
+
 _boot_error: str | None = None
 _settings: Settings | None = None
 _container: Container | None = None
+
 try:
-    _settings = get_settings()
+    # On Vercel, use environment variables only. Do not load the local .env file.
+    _settings = Settings(_env_file=None) if os.getenv("VERCEL") == "1" else get_settings()
+
     configure_logging(_settings.log_level, _settings.log_json)
     _container = build_container(_settings)
-except Exception as exc:  # noqa: BLE001
+
+except Exception as exc:
     if isinstance(exc, ValidationError):
-        _boot_error = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'settings'}: {e['msg']}" for e in exc.errors())
+        _boot_error = "; ".join(
+            f"{'.'.join(map(str, e['loc'])) or 'settings'}: {e['msg']}"
+            for e in exc.errors()
+        )
     else:
         _boot_error = f"{type(exc).__name__}: {exc}"
 
+
 _lifespan = _make_lifespan(_container, _settings) if _container is not None else None
-app = FastAPI(**_fastapi_kwargs(_settings or Settings.model_construct(app_env="production", vercel_env="production"), _lifespan))
+
+app = FastAPI(
+    **_fastapi_kwargs(
+        _settings or Settings.model_construct(app_env="production", vercel_env="production"),
+        _lifespan,
+    )
+)
+
 if _boot_error is None:
     install(app, _settings, _container)
+
 else:
     _message = f"Server configuration error: {_boot_error}"
     log.error(_message)
 
-    @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
+    @app.api_route(
+        "/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
     def _misconfigured(path: str):
-        return JSONResponse(status_code=503, content={"error": {"code": "server_misconfigured", "message": _message, "details": None, "request_id": None}})
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "code": "server_misconfigured",
+                    "message": _message,
+                    "details": None,
+                    "request_id": None,
+                }
+            },
+        )
