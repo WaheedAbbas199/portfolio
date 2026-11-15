@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     session_hours: int = 8
     public_origins: str = "http://localhost:8000"
     site_url: str = ""  # empty -> derived from Vercel (https://<production url>) or http://localhost:8000
+    google_site_verification: str = ""
     login_max_attempts: int = 5
     login_window_seconds: int = 600
 

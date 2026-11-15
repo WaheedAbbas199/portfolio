@@ -86,6 +86,7 @@ def _render_index(session: Session | None, settings: Settings) -> str:
         seo, img = dict(DEFAULT_SEO), None
 
     base, e = settings.effective_site_url, html.escape
+    google_verification = settings.google_site_verification.strip()
 
     meta = [
         f"<title>{e(seo['title'])}</title>",
@@ -98,6 +99,10 @@ def _render_index(session: Session | None, settings: Settings) -> str:
         f'<meta property="og:url" content="{e(base)}/">',
         '<meta name="twitter:card" content="summary_large_image">',
     ]
+    if google_verification:
+        meta.append(
+        f'<meta name="google-site-verification" content="{e(google_verification)}">'
+    )
 
     if img:
         meta.append(f'<meta property="og:image" content="{e(base + img)}">')
